@@ -4,36 +4,43 @@ import io
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-st.set_page_config(page_title="Uber Schicht-Check", layout="wide")
-st.title("🚗 Uber Fahrtenbuch Black-Box")
-st.write("Lade deine Uber-Liste hoch, um fahrerbezogene Auswertungen zu erhalten.")
+st.set_page_config(page_title="Uber Black-Box", layout="wide")
+st.title("🚗 Uber Schicht-Check & Black-Box")
 
-uploaded_file = st.file_uploader("Uber Excel- oder CSV-Datei wählen", type=["xlsx", "csv"])
+uploaded_file = st.file_uploader("Uber Liste hochladen", type=["xlsx", "csv"])
 
 if uploaded_file:
-    # Daten laden
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-
-    # Spaltennamen säubern
+    df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
     df.columns = [c.strip() for c in df.columns]
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Jeden Fahrer in ein eigenes Tabellenblatt
-        for fahrer in df['Fahrername'].unique():
-            f_df = df[df['Fahrername'] == fahrer].copy()
-            f_df['Uhrzeit des Fahrtbeginns'] = pd.to_datetime(f_df['Uhrzeit des Fahrtbeginns'])
-            f_df = f_df.sort_values('Uhrzeit des Fahrtbeginns')
-            
-            # Zeit wieder lesbar machen für Excel
-            f_df['Uhrzeit des Fahrtbeginns'] = f_df['Uhrzeit des Fahrtbeginns'].dt.strftime('%d.%m.%Y %H:%M')
-            
-            # Tabellenblatt erstellen (Name max 31 Zeichen)
-            sheet_name = str(fahrer)[:31]
-            f_df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-    st.success("Analyse abgeschlossen!")
-    st.download_button("Korigierte Excel herunterladen", data=output.getvalue(), file_name="Uber_Check_Ergebnis.xlsx")
+    # Automatische Spaltensuche (falls Uber die Namen ändert)
+    fahrer_col = next((c for c in df.columns if "Fahrer" in c), None)
+    zeit_col = next((c for c in df.columns if "Uhrzeit des Fahrtbeginns" in c or "Startzeit" in c), None)
+
+    if not fahrer_col or not zeit_col:
+        st.error(f"Spalten nicht gefunden. Vorhanden sind: {list(df.columns)}")
+    else:
+        output = io.BytesIO()
+        orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            for fahrer in df[fahrer_col].unique():
+                f_df = df[df[fahrer_col] == fahrer].copy()
+                f_df[zeit_col] = pd.to_datetime(f_df[zeit_col])
+                f_df = f_df.sort_values(zeit_col)
+
+                # Zeitdifferenz berechnen (in Minuten zum Vorjahr)
+                f_df['Differenz_Min'] = f_df[zeit_col].diff().dt.total_seconds() / 60
+                
+                sheet_name = str(fahrer)[:31].replace("[", "").replace("]", "")
+                f_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Orange Markierung für verdächtige Fahrten (< 5 Min Pause)
+                worksheet = writer.sheets[sheet_name]
+                for i, diff in enumerate(f_df['Differenz_Min'], start=2):
+                    if diff < 5:  # HIER: Grenze in Minuten einstellen
+                        for cell in worksheet[i]:
+                            cell.fill = orange_fill
+
+        st.success("Analyse fertig! Verdächtige Fahrten (< 5 Min Pause) sind orange markiert.")
+        st.download_button("Datei herunterladen", data=output.getvalue(), file_name="Uber_Check_Markiert.xlsx")

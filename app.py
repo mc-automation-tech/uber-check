@@ -3,12 +3,14 @@ import pandas as pd
 import io
 from openpyxl.styles import PatternFill
 
-# --- KONFIGURATION DEINES BETRIEBSSITZES ---
-# Hier deine echten Geschäftsstellen-Koordinaten eintragen:
-KOORDINATEN_BETRIEBSSITZ = "50.9333 6.9500" 
+st.set_page_config(page_title="Uber Smart-Logik", layout="wide")
+st.title("🚗 Uber Fahrtenbuch-Optimierer")
 
-st.set_page_config(page_title="Uber Smart-Check", layout="wide")
-st.title("🚗 Uber Intelligente Rückfahrt-Logik")
+# --- SIDEBAR KONFIGURATION ---
+with st.sidebar:
+    st.header("Konfiguration")
+    betriebssitz = st.text_input("Adresse/Koordinaten Betriebssitz", "Musterstraße 1, 12345 Stadt")
+    st.info("Grün = Lückenschluss (kleine Pause)\nOrange = Rückfahrtpflicht (große Pause)")
 
 uploaded_file = st.file_uploader("Uber Liste hochladen", type=["xlsx", "csv"])
 
@@ -24,17 +26,14 @@ if uploaded_file:
         df = pd.read_csv(uploaded_file, sep=None, engine='python') if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Zeit-Umwandlung
-        start_col = "Uhrzeit des Fahrtbeginns"
-        ende_col = "Uhrzeit des Fahrtendes"
-        eingang_col = "Datum/Uhrzeit Auftragseingang"
-        ueber_col = "Uhrzeit der Auftragsuebermittlung"
-        
-        for col in [start_col, ende_col, eingang_col, ueber_col]:
+        start_col, ende_col, eingang_col = "Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", "Datum/Uhrzeit Auftragseingang"
+        for col in [start_col, ende_col, eingang_col]:
             df[col] = pd.to_datetime(df[col], errors='coerce')
 
         output = io.BytesIO()
+        # Farben definieren
         orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+        green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             for fahrer in df["Fahrername"].unique():
@@ -43,56 +42,26 @@ if uploaded_file:
                 
                 for i in range(len(f_df)):
                     aktuelle_fahrt = f_df.iloc[i]
-                    
                     if i > 0:
                         vorherige_fahrt = f_df.iloc[i-1]
-                        pause = (aktuelle_fahrt[eingang_col] - vorherige_fahrt[ende_col]).total_seconds() / 60
+                        pause_min = (aktuelle_fahrt[eingang_col] - vorherige_fahrt[ende_col]).total_seconds() / 60
                         
-                        # Nur wenn Pause > 5 Minuten, wird eine Leerfahrt-Zeile fällig
-                        if pause > 5:
+                        # FALL 1: Kleine Lücke (5 - 15 Min) -> GRÜN (Anschlussfahrt simuliert)
+                        if 5 < pause_min <= 15:
                             leer = {c: "" for c in WUNSCH_SPALTEN}
                             leer["Fahrername"] = fahrer
                             leer["Datum der Fahrt"] = aktuelle_fahrt[start_col].strftime('%Y-%m-%d')
-                            leer["Uhrzeit des Fahrtbeginns"] = vorherige_fahrt[ende_col]
-                            leer["Uhrzeit des Fahrtendes"] = aktuelle_fahrt[eingang_col]
+                            leer["Uhrzeit des Fahrtbeginns"] = vorherige_fahrt[ende_col].strftime('%Y-%m-%d %H:%M:%S')
+                            leer["Uhrzeit des Fahrtendes"] = aktuelle_fahrt[eingang_col].strftime('%Y-%m-%d %H:%M:%S')
                             leer["Abholort"] = vorherige_fahrt["Zielort"]
-                            leer["Zielort"] = "Rückfahrt Betriebssitz"
-                            
-                            # Logik für Koordinaten-Berechnung
-                            # Annahme: Rückfahrt dauert 30 Min.
-                            if pause >= 30:
-                                leer["Standort des Fahrzeugs bei Auftragsuebermittlung"] = KOORDINATEN_BETRIEBSSITZ
-                            else:
-                                # Errechnet einen fiktiven Wendepunkt zwischen altem Ziel und Betriebssitz
-                                leer["Standort des Fahrzeugs bei Auftragsuebermittlung"] = "Wendepunkt (Rückweg)"
-                            
-                            leer["STATUS_INTERN"] = "ORANGE"
+                            leer["Zielort"] = aktuelle_fahrt["Abholort"]
+                            leer["Standort des Fahrzeugs bei Auftragsuebermittlung"] = "Bereitstellung (Anschluss)"
+                            leer["_COLOR"] = "GREEN"
                             neue_zeilen.append(leer)
-                    
-                    # Aktuelle Fahrt hinzufügen
-                    f_dict = aktuelle_fahrt.to_dict()
-                    f_dict["Datum der Fahrt"] = aktuelle_fahrt[start_col].strftime('%Y-%m-%d')
-                    neue_zeilen.append(f_dict)
-                
-                final_df = pd.DataFrame(neue_zeilen)
-                
-                # Formatierung der Zeit-Spalten ohne Millisekunden
-                for col in [start_col, ende_col, eingang_col, ueber_col]:
-                    if col in final_df.columns:
-                        final_df[col] = pd.to_datetime(final_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
-                
-                # Nur Wunsch-Spalten in das Excel-Blatt
-                final_df[WUNSCH_SPALTEN].to_excel(writer, sheet_name=str(fahrer)[:30], index=False)
-                
-                # Orange Färbung anwenden
-                ws = writer.sheets[str(fahrer)[:30]]
-                for idx, row in enumerate(neue_zeilen, start=2):
-                    if row.get("STATUS_INTERN") == "ORANGE":
-                        for cell in ws[idx]:
-                            cell.fill = orange_fill
                             
-        st.success("✅ Smart-Analyse abgeschlossen.")
-        st.download_button("Download Ergebnis", data=output.getvalue(), file_name="Uber_Check_Smart.xlsx")
-
-    except Exception as e:
-        st.error(f"Fehler: {e}")
+                        # FALL 2: Große Lücke (> 15 Min) -> ORANGE (Rückfahrtpflicht)
+                        elif pause_min > 15:
+                            leer = {c: "" for c in WUNSCH_SPALTEN}
+                            leer["Fahrername"] = fahrer
+                            leer["Datum der Fahrt"] = aktuelle_fahrt[start_col].strftime('%Y-%m-%d')
+                            leer["Uhrzeit des Fahrtbeginns"] = vorherige_fahrt

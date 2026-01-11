@@ -4,7 +4,7 @@ import io
 import math
 from openpyxl.styles import PatternFill
 
-st.set_page_config(page_title="Uber Smart-GPS Pro", layout="wide")
+st.set_page_config(page_title="Uber Smart-Logik Pro", layout="wide")
 st.title("🚗 Uber Fahrtenbuch-Generator")
 
 # --- SIDEBAR ---
@@ -16,7 +16,9 @@ with st.sidebar:
     bs_coords = st.text_input("GPS Betriebssitz (Lat Lon)", "50.885277 6.9877386")
     st.markdown("---")
     speed_kmh = st.number_input("Durchschnitts-KM/H", value=50)
-    st.info("Hinweis: Stornierte Fahrten werden automatisch ignoriert.")
+    # Neu: Regler für die Farblogik
+    limit_min = st.slider("Ab wann Orange (Rückfahrt)? (Minuten)", 5, 45, 15)
+    st.info("Unter diesem Wert = Grün (Wenden), darüber = Orange (Rückfahrt Basis).")
 
 full_bs_address = f"{str_hnr}, {plz} {ort}"
 
@@ -48,16 +50,12 @@ if uploaded_file:
         df = pd.read_csv(uploaded_file, sep=None, engine='python') if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. SCHRITT: NUR ABGESCHLOSSENE FAHRTEN NUTZEN
         if "Fahrtstatus" in df.columns:
             df = df[df["Fahrtstatus"].str.contains("abgeschlossen", case=False, na=False)]
         
-        # 2. SCHRITT: LEERE FAHRER ODER ZEITEN ENTFERNEN
         df = df.dropna(subset=["Fahrername", "Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes"])
 
-        if df.empty:
-            st.warning("⚠️ Keine abgeschlossenen Fahrten in der Datei gefunden!")
-        else:
+        if not df.empty:
             time_cols = ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", 
                          "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung"]
             for col in time_cols:
@@ -67,13 +65,8 @@ if uploaded_file:
             orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
             green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
             
-            # Sicherheits-Check: Wurde mindestens ein Fahrer gefunden?
-            sheets_created = 0
-            
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 for fahrer, group in df.groupby("Fahrername"):
-                    if pd.isna(fahrer) or str(fahrer).strip() == "": continue
-                    
                     f_df = group.sort_values("Uhrzeit des Fahrtbeginns").copy()
                     neue_zeilen = []
                     
@@ -91,11 +84,10 @@ if uploaded_file:
                                 leer["Uhrzeit des Fahrtendes"] = aktuelle_fahrt["Datum/Uhrzeit Auftragseingang"].strftime('%Y-%m-%d %H:%M:%S')
                                 leer["Abholort"] = vorherige_fahrt["Zielort"]
                                 leer["Kilometer"] = round(pause_min * (speed_kmh / 60), 2)
-                                
                                 last_gps = str(vorherige_fahrt["Standort des Fahrzeugs bei Auftragsuebermittlung"])
                                 leer["Standort des Fahrzeugs bei Auftragsuebermittlung"] = calculate_current_gps(last_gps, bs_coords, pause_min, speed_kmh)
                                 
-                                if pause_min <= 15:
+                                if pause_min <= limit_min:
                                     leer["Zielort"] = aktuelle_fahrt["Abholort"]
                                     leer["_COLOR"] = "GREEN"
                                 else:
@@ -111,25 +103,31 @@ if uploaded_file:
                         f_dict["_COLOR"] = "WHITE"
                         neue_zeilen.append(f_dict)
                     
-                    if neue_zeilen:
-                        final_df = pd.DataFrame(neue_zeilen)
-                        sheet_name = "".join([c for c in str(fahrer) if c.isalnum() or c==' '])[:30].strip()
-                        final_df[WUNSCH_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
-                        
-                        ws = writer.sheets[sheet_name]
-                        for idx, row in enumerate(neue_zeilen, start=2):
-                            c = row.get("_COLOR")
-                            if c == "ORANGE":
-                                for cell in ws[idx]: cell.fill = orange_fill
-                            elif c == "GREEN":
-                                for cell in ws[idx]: cell.fill = green_fill
-                        sheets_created += 1
-
-            if sheets_created > 0:
-                st.success(f"✅ Erfolg! {sheets_created} Fahrer-Blätter wurden erstellt.")
-                st.download_button("Datei herunterladen", data=output.getvalue(), file_name="Uber_Fahrtenbuch_Pro.xlsx")
-            else:
-                st.error("❌ Es konnten keine Daten verarbeitet werden. Überprüfe die Spalte 'Fahrername'.")
-
+                    # Erstellen des Sheets
+                    final_df = pd.DataFrame(neue_zeilen)
+                    sheet_name = "".join([c for c in str(fahrer) if c.isalnum() or c==' '])[:30].strip()
+                    final_df[WUNSCH_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # --- AUTOMATISCHE SPALTENBREITE & FARBEN ---
+                    ws = writer.sheets[sheet_name]
+                    for col_idx, column in enumerate(ws.columns, 1):
+                        max_length = 0
+                        column_letter = ws.cell(row=1, column=col_idx).column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except: pass
+                        ws.column_dimensions[column_letter].width = max_length + 4 # Puffer
+                    
+                    for idx, row in enumerate(neue_zeilen, start=2):
+                        c = row.get("_COLOR")
+                        if c == "ORANGE":
+                            for cell in ws[idx]: cell.fill = orange_fill
+                        elif c == "GREEN":
+                            for cell in ws[idx]: cell.fill = green_fill
+            
+            st.success("✅ Analyse fertig. Spalten wurden automatisch angepasst.")
+            st.download_button("Excel-Datei herunterladen", data=output.getvalue(), file_name="Uber_Fahrtenbuch_Optimiert.xlsx")
     except Exception as e:
-        st.error(f"Kritischer Fehler: {e}")
+        st.error(f"Fehler: {e}")

@@ -5,7 +5,7 @@ import math
 from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="Uber Smart-GPS Pro", layout="wide")
-st.title("🚗 Uber Fahrtenbuch: Getrennte Auswertung pro Fahrer")
+st.title("🚗 Uber Fahrtenbuch: GPS-Logik & Fahrer-Trennung")
 
 # --- SIDEBAR: KONFIGURATION ---
 with st.sidebar:
@@ -14,16 +14,16 @@ with st.sidebar:
     hausnummer = st.text_input("Hausnummer", "3")
     plz = st.text_input("PLZ", "50999")
     ort = st.text_input("Ort", "Köln")
-    bs_coords = st.text_input("GPS Betriebssitz (z.B. 50.8800 6.9900)", "50.885277 6.9877386")
+    bs_coords = st.text_input("GPS Betriebssitz (Lat Lon)", "50.885277 6.9877386")
     
     st.markdown("---")
     speed_kmh = st.number_input("Durchschnitts-KM/H für Leerfahrt", value=50)
-    st.info("Das Programm erstellt für jeden Fahrer ein eigenes Blatt in der Excel-Datei.")
+    st.info("Logik: 50 km/h Richtung Betriebssitz. Standorte werden auf dem Weg berechnet.")
 
 full_bs_address = f"{strasse} {hausnummer}, {plz} {ort}"
 
 def calculate_current_gps(start_gps_str, target_gps_str, minutes, speed):
-    """Berechnet die GPS-Position zwischen zwei Punkten nach X Minuten."""
+    """Berechnet die GPS-Position zwischen zwei Punkten basierend auf der Zeit."""
     try:
         s_lat, s_lon = map(float, str(start_gps_str).split())
         t_lat, t_lon = map(float, str(target_gps_str).split())
@@ -42,6 +42,7 @@ def calculate_current_gps(start_gps_str, target_gps_str, minutes, speed):
     except:
         return start_gps_str
 
+# --- DATEI HOCHLADEN ---
 uploaded_file = st.file_uploader("Uber Liste hochladen", type=["xlsx", "csv"])
 
 WUNSCH_SPALTEN = [
@@ -53,7 +54,7 @@ WUNSCH_SPALTEN = [
 
 if uploaded_file:
     try:
-        # Datei einlesen
+        # Einlesen
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, sep=None, engine='python')
         else:
@@ -61,7 +62,7 @@ if uploaded_file:
         
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Spalten für Zeiten konvertieren
+        # Zeitspalten konvertieren
         time_cols = ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", 
                      "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung"]
         for col in time_cols:
@@ -72,9 +73,8 @@ if uploaded_file:
         orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
         green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
         
-        # Excel-Erstellung
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Gruppen nach Fahrername
+            # Trennung pro Fahrer
             for fahrer, group in df.groupby("Fahrername"):
                 f_df = group.sort_values("Uhrzeit des Fahrtbeginns").copy()
                 neue_zeilen = []
@@ -82,10 +82,8 @@ if uploaded_file:
                 for i in range(len(f_df)):
                     aktuelle_fahrt = f_df.iloc[i]
                     
-                    # Logik für Pausen zwischen Fahrten
                     if i > 0:
                         vorherige_fahrt = f_df.iloc[i-1]
-                        # Pause zwischen Ende alter Fahrt und Eingang neuer Auftrag
                         pause_min = (aktuelle_fahrt["Datum/Uhrzeit Auftragseingang"] - vorherige_fahrt["Uhrzeit des Fahrtendes"]).total_seconds() / 60
                         
                         if pause_min > 5:
@@ -95,4 +93,47 @@ if uploaded_file:
                             leer["Uhrzeit des Fahrtbeginns"] = vorherige_fahrt["Uhrzeit des Fahrtendes"].strftime('%Y-%m-%d %H:%M:%S')
                             leer["Uhrzeit des Fahrtendes"] = aktuelle_fahrt["Datum/Uhrzeit Auftragseingang"].strftime('%Y-%m-%d %H:%M:%S')
                             leer["Abholort"] = vorherige_fahrt["Zielort"]
-                            leer["Kilometer"] = round(pause_min * (
+                            
+                            # KM-Berechnung (Klammerfehler behoben)
+                            leer["Kilometer"] = round(pause_min * (speed_kmh / 60), 2)
+                            
+                            # GPS-Position berechnen
+                            last_gps = str(vorherige_fahrt["Standort des Fahrzeugs bei Auftragsuebermittlung"])
+                            leer["Standort des Fahrzeugs bei Auftragsuebermittlung"] = calculate_current_gps(last_gps, bs_coords, pause_min, speed_kmh)
+                            
+                            if pause_min <= 15:
+                                leer["Zielort"] = aktuelle_fahrt["Abholort"]
+                                leer["_COLOR"] = "GREEN"
+                            else:
+                                leer["Zielort"] = f"Betriebssitz ({full_bs_address})"
+                                leer["_COLOR"] = "ORANGE"
+                            neue_zeilen.append(leer)
+                    
+                    # Originalfahrt hinzufügen
+                    f_dict = aktuelle_fahrt.to_dict()
+                    f_dict["Datum der Fahrt"] = aktuelle_fahrt["Uhrzeit des Fahrtbeginns"].strftime('%Y-%m-%d')
+                    for k in time_cols:
+                        if k in f_dict and pd.notnull(f_dict[k]):
+                            f_dict[k] = pd.to_datetime(f_dict[k]).strftime('%Y-%m-%d %H:%M:%S')
+                    f_dict["_COLOR"] = "WHITE"
+                    neue_zeilen.append(f_dict)
+                
+                # Sheet für Fahrer erstellen
+                final_df = pd.DataFrame(neue_zeilen)
+                sheet_name = str(fahrer)[:30].strip()
+                final_df[WUNSCH_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Farben setzen
+                ws = writer.sheets[sheet_name]
+                for idx, row in enumerate(neue_zeilen, start=2):
+                    c = row.get("_COLOR")
+                    if c == "ORANGE":
+                        for cell in ws[idx]: cell.fill = orange_fill
+                    elif c == "GREEN":
+                        for cell in ws[idx]: cell.fill = green_fill
+                            
+        st.success(f"✅ Analyse abgeschlossen. Datei enthält getrennte Blätter für jeden Fahrer.")
+        st.download_button("Ergebnis herunterladen", data=output.getvalue(), file_name="Uber_Fahrtenbuch_Final.xlsx")
+
+    except Exception as e:
+        st.error(f"Fehler: {e}")

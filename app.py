@@ -2,18 +2,18 @@ import streamlit as st
 import pandas as pd
 import io
 from datetime import timedelta
+from openpyxl.styles import PatternFill
 
-st.set_page_config(page_title="Uber Logik Full-Data", layout="wide")
-st.title("🚗 Fahrtenbuch-Generator (Alle Spalten + Diskret)")
+st.set_page_config(page_title="Uber Logik Color-Mode", layout="wide")
+st.title("🚗 Fahrtenbuch-Generator (Original vs. Korrektur)")
 
 with st.sidebar:
     st.header("⚙️ Einstellungen")
     speed_kmh = st.number_input("Schnitt-KM/H für Leerzeiten", value=25)
-    st.info("Alle Original-Spalten bleiben erhalten. Lücken werden zwischen Zielort A und Abholort B geschlossen.")
+    st.info("Weiß = Original Uber | Orange = Berechnete Korrektur")
 
 uploaded_file = st.file_uploader("Uber Liste hochladen", type=["xlsx", "csv"])
 
-# Deine exakte Spaltenliste
 ALLE_SPALTEN = [
     "Datum/Uhrzeit Auftragseingang", 
     "Uhrzeit der Auftragsuebermittlung", 
@@ -39,18 +39,19 @@ if uploaded_file:
             df = pd.read_excel(uploaded_file)
         
         df.columns = [str(c).strip() for c in df.columns]
-        
-        # Zeit-Korrektur für Stabilität
         df["Uhrzeit des Fahrtbeginns"] = pd.to_datetime(df["Uhrzeit des Fahrtbeginns"], errors='coerce')
         df["Uhrzeit des Fahrtendes"] = pd.to_datetime(df["Uhrzeit des Fahrtendes"], errors='coerce')
         df = df.dropna(subset=["Kennzeichen", "Uhrzeit des Fahrtbeginns"])
 
         if not df.empty:
             output = io.BytesIO()
+            # Definition der orangen Farbe
+            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 for kennzeichen, k_group in df.groupby("Kennzeichen"):
                     k_group['Tag'] = k_group['Uhrzeit des Fahrtbeginns'].dt.date
-                    final_rows = []
+                    final_rows_with_meta = [] # Speichert Zeile + Farb-Info
 
                     for tag, tag_group in k_group.groupby('Tag'):
                         tag_group = tag_group.sort_values("Uhrzeit des Fahrtbeginns")
@@ -60,17 +61,16 @@ if uploaded_file:
                             f_start = fahrt["Uhrzeit des Fahrtbeginns"]
                             f_ende = fahrt["Uhrzeit des Fahrtendes"] if pd.notnull(fahrt["Uhrzeit des Fahrtendes"]) else f_start + timedelta(minutes=15)
                             
-                            # 1. Echte Fahrt (alle Spalten übernehmen)
+                            # 1. ECHTE FAHRT (WEISS)
                             f_dict = {c: fahrt.get(c, "") for c in ALLE_SPALTEN}
-                            # Zeiten für Excel schön formatieren
-                            f_dict["Uhrzeit des Fahrtbeginns"] = f_start.strftime('%Y-%m-%d %H:%M:%S')
-                            f_dict["Uhrzeit des Fahrtendes"] = f_ende.strftime('%Y-%m-%d %H:%M:%S')
-                            if pd.notnull(f_dict.get("Datum/Uhrzeit Auftragseingang")):
-                                f_dict["Datum/Uhrzeit Auftragseingang"] = pd.to_datetime(f_dict["Datum/Uhrzeit Auftragseingang"]).strftime('%Y-%m-%d %H:%M:%S')
-                            
-                            final_rows.append(f_dict)
+                            f_dict.update({
+                                "Uhrzeit des Fahrtbeginns": f_start.strftime('%Y-%m-%d %H:%M:%S'),
+                                "Uhrzeit des Fahrtendes": f_ende.strftime('%Y-%m-%d %H:%M:%S'),
+                                "_IS_CORRECTION": False
+                            })
+                            final_rows_with_meta.append(f_dict)
 
-                            # 2. Lücke zum nächsten Auftrag füllen (Leerfahrt)
+                            # 2. LÜCKE FÜLLEN (ORANGE)
                             if i < len(tag_group) - 1:
                                 naechste = tag_group.iloc[i+1]
                                 n_start = naechste["Uhrzeit des Fahrtbeginns"]
@@ -80,25 +80,34 @@ if uploaded_file:
                                     leer = {c: "" for c in ALLE_SPALTEN}
                                     leer.update({
                                         "Datum der Fahrt": tag,
-                                        "Fahrtstatus": "Betriebsfahrt",
+                                        "Fahrtstatus": "Betriebsfahrt (Korrektur)",
                                         "Uhrzeit des Fahrtbeginns": f_ende.strftime('%Y-%m-%d %H:%M:%S'),
                                         "Uhrzeit des Fahrtendes": n_start.strftime('%Y-%m-%d %H:%M:%S'),
                                         "Kennzeichen": kennzeichen,
-                                        "Fahrzeugtyp": fahrt.get("Fahrzeugtyp", ""),
                                         "Fahrername": fahrt.get("Fahrername", ""),
-                                        "Abholort": fahrt.get("Zielort", ""), # Startet am Ende der letzten Fahrt
-                                        "Zielort": naechste.get("Abholort", ""), # Endet am Start der nächsten Fahrt
+                                        "Abholort": fahrt.get("Zielort", ""),
+                                        "Zielort": naechste.get("Abholort", ""),
                                         "Kilometer": round(luecke_min * (speed_kmh / 60), 2),
-                                        "Fahrpreis": 0 # Kein Preis für Leerfahrt
+                                        "Fahrpreis": 0,
+                                        "_IS_CORRECTION": True
                                     })
-                                    final_rows.append(leer)
+                                    final_rows_with_meta.append(leer)
 
-                    res_df = pd.DataFrame(final_rows)
-                    # Sicherstellen, dass die Reihenfolge der Spalten genau wie gewünscht ist
-                    res_df = res_df[ALLE_SPALTEN]
-                    res_df.to_excel(writer, sheet_name=str(kennzeichen)[:30], index=False)
+                    # DataFrame erstellen und Metadaten-Spalte für Excel-Styling nutzen
+                    res_df = pd.DataFrame(final_rows_with_meta)
+                    sheet_name = str(kennzeichen)[:30]
+                    
+                    # Nur die echten Spalten in Excel schreiben
+                    res_df[ALLE_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Styling anwenden
+                    ws = writer.sheets[sheet_name]
+                    for row_idx, row_data in enumerate(final_rows_with_meta, start=2): # start=2 wegen Header
+                        if row_data["_IS_CORRECTION"]:
+                            for col_idx in range(1, len(ALLE_SPALTEN) + 1):
+                                ws.cell(row=row_idx, column=col_idx).fill = orange_fill
 
-            st.success(f"✅ Datei mit allen {len(ALLE_SPALTEN)} Spalten erstellt!")
-            st.download_button("Excel mit allen Feldern herunterladen", data=output.getvalue(), file_name="Uber_Fahrtenbuch_Komplett.xlsx")
+            st.success("✅ Fertig! Originale sind weiß, Korrekturen sind orange markiert.")
+            st.download_button("Excel mit Farbmarkierung herunterladen", data=output.getvalue(), file_name="Fahrtenbuch_Markiert.xlsx")
     except Exception as e:
         st.error(f"Fehler: {e}")

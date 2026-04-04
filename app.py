@@ -4,31 +4,21 @@ import io
 from datetime import timedelta
 from openpyxl.styles import PatternFill
 
-st.set_page_config(page_title="Uber Logik Color-Mode", layout="wide")
-st.title("🚗 Fahrtenbuch-Generator (Original vs. Korrektur)")
+st.set_page_config(page_title="Uber Logik Korrektur-Modus", layout="wide")
+st.title("🚗 Fahrtenbuch-Optimierung (Keine Zusatzzeilen)")
 
 with st.sidebar:
     st.header("⚙️ Einstellungen")
-    speed_kmh = st.number_input("Schnitt-KM/H für Leerzeiten", value=25)
-    st.info("Weiß = Original Uber | Orange = Berechnete Korrektur")
+    speed_kmh = st.number_input("Schnitt-KM/H für die Zeitüberbrückung", value=20)
+    st.info("Logik: Der Fahrtbeginn wird nach vorne gezogen, um Lücken zu schließen. Korrigierte Zeilen werden orange.")
 
-uploaded_file = st.file_uploader("Uber Liste hochladen", type=["xlsx", "csv"])
+uploaded_file = st.file_uploader("Uber Liste hochladen (z.B. test.xlsx)", type=["xlsx", "csv"])
 
 ALLE_SPALTEN = [
-    "Datum/Uhrzeit Auftragseingang", 
-    "Uhrzeit der Auftragsuebermittlung", 
-    "Datum der Fahrt", 
-    "Fahrtstatus", 
-    "Standort des Fahrzeugs bei Auftragsuebermittlung", 
-    "Uhrzeit des Fahrtbeginns", 
-    "Uhrzeit des Fahrtendes", 
-    "Kennzeichen", 
-    "Fahrzeugtyp", 
-    "Fahrername", 
-    "Fahrpreis", 
-    "Kilometer", 
-    "Abholort", 
-    "Zielort"
+    "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung", "Datum der Fahrt", 
+    "Fahrtstatus", "Standort des Fahrzeugs bei Auftragsuebermittlung", "Uhrzeit des Fahrtbeginns", 
+    "Uhrzeit des Fahrtendes", "Kennzeichen", "Fahrzeugtyp", "Fahrername", 
+    "Fahrpreis", "Kilometer", "Abholort", "Zielort"
 ]
 
 if uploaded_file:
@@ -39,75 +29,69 @@ if uploaded_file:
             df = pd.read_excel(uploaded_file)
         
         df.columns = [str(c).strip() for c in df.columns]
+        
+        # Zeit-Konvertierung
         df["Uhrzeit des Fahrtbeginns"] = pd.to_datetime(df["Uhrzeit des Fahrtbeginns"], errors='coerce')
         df["Uhrzeit des Fahrtendes"] = pd.to_datetime(df["Uhrzeit des Fahrtendes"], errors='coerce')
         df = df.dropna(subset=["Kennzeichen", "Uhrzeit des Fahrtbeginns"])
 
-        if not df.empty:
-            output = io.BytesIO()
-            # Definition der orangen Farbe
-            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+        output = io.BytesIO()
+        orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
 
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                for kennzeichen, k_group in df.groupby("Kennzeichen"):
-                    k_group['Tag'] = k_group['Uhrzeit des Fahrtbeginns'].dt.date
-                    final_rows_with_meta = [] # Speichert Zeile + Farb-Info
-
-                    for tag, tag_group in k_group.groupby('Tag'):
-                        tag_group = tag_group.sort_values("Uhrzeit des Fahrtbeginns")
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            for kennzeichen, k_group in df.groupby("Kennzeichen"):
+                k_group = k_group.sort_values("Uhrzeit des Fahrtbeginns")
+                final_rows = []
+                
+                # Wir gehen die Fahrten durch und ziehen die Zeiten zusammen
+                for i in range(len(k_group)):
+                    current = k_group.iloc[i].to_dict()
+                    is_corrected = False
+                    
+                    if i > 0:
+                        prev_ende = final_rows[i-1]["Uhrzeit des Fahrtendes"]
+                        this_start = current["Uhrzeit des Fahrtbeginns"]
                         
-                        for i in range(len(tag_group)):
-                            fahrt = tag_group.iloc[i]
-                            f_start = fahrt["Uhrzeit des Fahrtbeginns"]
-                            f_ende = fahrt["Uhrzeit des Fahrtendes"] if pd.notnull(fahrt["Uhrzeit des Fahrtendes"]) else f_start + timedelta(minutes=15)
+                        # Wenn eine Lücke von mehr als 1 Minute existiert
+                        if this_start > prev_ende + timedelta(minutes=1):
+                            diff_min = (this_start - prev_ende).total_seconds() / 60
+                            # Kilometer für die Lücke berechnen
+                            extra_km = round(diff_min * (speed_kmh / 60), 2)
                             
-                            # 1. ECHTE FAHRT (WEISS)
-                            f_dict = {c: fahrt.get(c, "") for c in ALLE_SPALTEN}
-                            f_dict.update({
-                                "Uhrzeit des Fahrtbeginns": f_start.strftime('%Y-%m-%d %H:%M:%S'),
-                                "Uhrzeit des Fahrtendes": f_ende.strftime('%Y-%m-%d %H:%M:%S'),
-                                "_IS_CORRECTION": False
-                            })
-                            final_rows_with_meta.append(f_dict)
-
-                            # 2. LÜCKE FÜLLEN (ORANGE)
-                            if i < len(tag_group) - 1:
-                                naechste = tag_group.iloc[i+1]
-                                n_start = naechste["Uhrzeit des Fahrtbeginns"]
-                                luecke_min = (n_start - f_ende).total_seconds() / 60
-                                
-                                if luecke_min > 1:
-                                    leer = {c: "" for c in ALLE_SPALTEN}
-                                    leer.update({
-                                        "Datum der Fahrt": tag,
-                                        "Fahrtstatus": "Betriebsfahrt (Korrektur)",
-                                        "Uhrzeit des Fahrtbeginns": f_ende.strftime('%Y-%m-%d %H:%M:%S'),
-                                        "Uhrzeit des Fahrtendes": n_start.strftime('%Y-%m-%d %H:%M:%S'),
-                                        "Kennzeichen": kennzeichen,
-                                        "Fahrername": fahrt.get("Fahrername", ""),
-                                        "Abholort": fahrt.get("Zielort", ""),
-                                        "Zielort": naechste.get("Abholort", ""),
-                                        "Kilometer": round(luecke_min * (speed_kmh / 60), 2),
-                                        "Fahrpreis": 0,
-                                        "_IS_CORRECTION": True
-                                    })
-                                    final_rows_with_meta.append(leer)
-
-                    # DataFrame erstellen und Metadaten-Spalte für Excel-Styling nutzen
-                    res_df = pd.DataFrame(final_rows_with_meta)
-                    sheet_name = str(kennzeichen)[:30]
+                            # KORREKTUR: Startzeit auf das Ende der letzten Fahrt setzen
+                            current["Uhrzeit des Fahrtbeginns"] = prev_ende
+                            # Kilometer erhöhen (Original + Anfahrt)
+                            try:
+                                current["Kilometer"] = float(current["Kilometer"]) + extra_km
+                            except:
+                                current["Kilometer"] = extra_km
+                            
+                            current["Fahrtstatus"] = "Anfahrt + Auftrag"
+                            is_corrected = True
                     
-                    # Nur die echten Spalten in Excel schreiben
-                    res_df[ALLE_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
-                    
-                    # Styling anwenden
-                    ws = writer.sheets[sheet_name]
-                    for row_idx, row_data in enumerate(final_rows_with_meta, start=2): # start=2 wegen Header
-                        if row_data["_IS_CORRECTION"]:
-                            for col_idx in range(1, len(ALLE_SPALTEN) + 1):
-                                ws.cell(row=row_idx, column=col_idx).fill = orange_fill
+                    # Zeit für die Ausgabe formatieren
+                    current["_IS_CORRECTED"] = is_corrected
+                    final_rows.append(current)
 
-            st.success("✅ Fertig! Originale sind weiß, Korrekturen sind orange markiert.")
-            st.download_button("Excel mit Farbmarkierung herunterladen", data=output.getvalue(), file_name="Fahrtenbuch_Markiert.xlsx")
+                # Zurück in DataFrame und Formatierung
+                res_df = pd.DataFrame(final_rows)
+                
+                # Datumsobjekte für Excel-Export in Strings wandeln
+                for col in ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes"]:
+                    res_df[col] = res_df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+                
+                sheet_name = str(kennzeichen)[:30]
+                res_df[ALLE_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Styling
+                ws = writer.sheets[sheet_name]
+                for idx, row_data in enumerate(final_rows, start=2):
+                    if row_data["_IS_CORRECTED"]:
+                        for col_idx in range(1, len(ALLE_SPALTEN) + 1):
+                            ws.cell(row=idx, column=col_idx).fill = orange_fill
+
+        st.success("✅ Optimierung abgeschlossen. Lücken wurden in die Fahrten integriert.")
+        st.download_button("Optimierte Excel herunterladen", data=output.getvalue(), file_name="Uber_Optimiert_Lueckenlos.xlsx")
+        
     except Exception as e:
-        st.error(f"Fehler: {e}")
+        st.error(f"Fehler bei der Verarbeitung: {e}")

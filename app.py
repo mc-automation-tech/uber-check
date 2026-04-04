@@ -71,4 +71,31 @@ if uploaded_file:
                                 row["Kilometer"] = round(float(row["Kilometer"]) + extra_km, 2)
                             except:
                                 row["Kilometer"] = extra_km
-                            row
+                            row["_IS_CORRECTED"] = True
+                    
+                    final_rows.append(row)
+
+                # Zurück in DataFrame
+                res_df = pd.DataFrame(final_rows)
+                
+                # Formatierung für Excel (Datum zurück zu String ohne Millisekunden)
+                for col in ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes"]:
+                    res_df[col] = res_df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                sheet_name = str(kennzeichen)[:30]
+                # Nur gewünschte Spalten exportieren
+                cols_to_export = [c for c in ALLE_SPALTEN if c in res_df.columns]
+                res_df[cols_to_export].to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Farbe setzen
+                ws = writer.sheets[sheet_name]
+                for idx, r_data in enumerate(final_rows, start=2):
+                    if r_data["_IS_CORRECTED"]:
+                        for c_idx in range(1, len(cols_to_export) + 1):
+                            ws.cell(row=idx, column=c_idx).fill = orange_fill
+
+        st.success("✅ Erledigt! '\\N' Fehler abgefangen und Lücken geschlossen.")
+        st.download_button("Optimierte Datei laden", data=output.getvalue(), file_name="Uber_Korrektur_Final.xlsx")
+        
+    except Exception as e:
+        st.error(f"Kritischer Fehler: {e}")

@@ -5,20 +5,20 @@ import math
 from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="Uber Smart-Logik Pro", layout="wide")
-st.title("🚗 Uber Fahrtenbuch-Generator")
+st.title("🚗 Uber Fahrtenbuch-Generator (Kennzeichen-Modus)")
 
-# --- SIDEBAR ---
+# --- SIDEBAR: STANDARDWERTE JETZT AUF FRECHEN ANGEPASST ---
 with st.sidebar:
     st.header("🏢 Betriebssitz Daten")
-    str_hnr = st.text_input("Straße & Hausnummer", "Falderstraße 3")
-    plz = st.text_input("PLZ", "50999")
-    ort = st.text_input("Ort", "Köln")
-    bs_coords = st.text_input("GPS Betriebssitz (Lat Lon)", "50.885277 6.9877386")
+    str_hnr = st.text_input("Straße & Hausnummer", "Alfred-Nobel-Straße 29")
+    plz = st.text_input("PLZ", "50226")
+    ort = st.text_input("Ort", "Frechen")
+    # Die neuen Koordinaten für Frechen
+    bs_coords = st.text_input("GPS Betriebssitz (Lat Lon)", "50.914312 6.819731")
     st.markdown("---")
     speed_kmh = st.number_input("Durchschnitts-KM/H", value=50)
-    # Neu: Regler für die Farblogik
     limit_min = st.slider("Ab wann Orange (Rückfahrt)? (Minuten)", 5, 45, 15)
-    st.info("Unter diesem Wert = Grün (Wenden), darüber = Orange (Rückfahrt Basis).")
+    st.info("Info: Dieses Programm sortiert jetzt nach KENNZEICHEN (pro Auto ein Blatt).")
 
 full_bs_address = f"{str_hnr}, {plz} {ort}"
 
@@ -53,7 +53,8 @@ if uploaded_file:
         if "Fahrtstatus" in df.columns:
             df = df[df["Fahrtstatus"].str.contains("abgeschlossen", case=False, na=False)]
         
-        df = df.dropna(subset=["Fahrername", "Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes"])
+        # Geändert auf Kennzeichen-Pflicht
+        df = df.dropna(subset=["Kennzeichen", "Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes"])
 
         if not df.empty:
             time_cols = ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", 
@@ -66,7 +67,8 @@ if uploaded_file:
             green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
             
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                for fahrer, group in df.groupby("Fahrername"):
+                # JETZT GRUPPIERUNG NACH KENNZEICHEN
+                for kennzeichen, group in df.groupby("Kennzeichen"):
                     f_df = group.sort_values("Uhrzeit des Fahrtbeginns").copy()
                     neue_zeilen = []
                     
@@ -78,7 +80,8 @@ if uploaded_file:
                             
                             if pause_min > 5:
                                 leer = {c: "" for c in WUNSCH_SPALTEN}
-                                leer["Fahrername"] = fahrer
+                                leer["Kennzeichen"] = kennzeichen
+                                leer["Fahrername"] = aktuelle_fahrt["Fahrername"]
                                 leer["Datum der Fahrt"] = aktuelle_fahrt["Uhrzeit des Fahrtbeginns"].strftime('%Y-%m-%d')
                                 leer["Uhrzeit des Fahrtbeginns"] = vorherige_fahrt["Uhrzeit des Fahrtendes"].strftime('%Y-%m-%d %H:%M:%S')
                                 leer["Uhrzeit des Fahrtendes"] = aktuelle_fahrt["Datum/Uhrzeit Auftragseingang"].strftime('%Y-%m-%d %H:%M:%S')
@@ -103,22 +106,19 @@ if uploaded_file:
                         f_dict["_COLOR"] = "WHITE"
                         neue_zeilen.append(f_dict)
                     
-                    # Erstellen des Sheets
                     final_df = pd.DataFrame(neue_zeilen)
-                    sheet_name = "".join([c for c in str(fahrer) if c.isalnum() or c==' '])[:30].strip()
+                    sheet_name = "".join([c for c in str(kennzeichen) if c.isalnum() or c==' '])[:30].strip()
                     final_df[WUNSCH_SPALTEN].to_excel(writer, sheet_name=sheet_name, index=False)
                     
-                    # --- AUTOMATISCHE SPALTENBREITE & FARBEN ---
                     ws = writer.sheets[sheet_name]
                     for col_idx, column in enumerate(ws.columns, 1):
                         max_length = 0
                         column_letter = ws.cell(row=1, column=col_idx).column_letter
                         for cell in column:
                             try:
-                                if len(str(cell.value)) > max_length:
-                                    max_length = len(str(cell.value))
+                                if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
                             except: pass
-                        ws.column_dimensions[column_letter].width = max_length + 4 # Puffer
+                        ws.column_dimensions[column_letter].width = max_length + 4
                     
                     for idx, row in enumerate(neue_zeilen, start=2):
                         c = row.get("_COLOR")
@@ -127,7 +127,7 @@ if uploaded_file:
                         elif c == "GREEN":
                             for cell in ws[idx]: cell.fill = green_fill
             
-            st.success("✅ Analyse fertig. Spalten wurden automatisch angepasst.")
-            st.download_button("Excel-Datei herunterladen", data=output.getvalue(), file_name="Uber_Fahrtenbuch_Optimiert.xlsx")
+            st.success("✅ Fertig! Gruppiert nach Kennzeichen & Betriebssitz Frechen.")
+            st.download_button("Excel herunterladen", data=output.getvalue(), file_name="Uber_Fahrtenbuch_Frechen.xlsx")
     except Exception as e:
         st.error(f"Fehler: {e}")

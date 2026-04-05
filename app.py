@@ -7,8 +7,10 @@ from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="Taryel Ultimate Logic", layout="wide")
 
+# --- UI ---
 st.title("🚗 Taryel-Logik: Realistische Schichten & Standorte")
-st.markdown("Dieses Skript bereinigt \N, simuliert Standorte und glättet die Fahrtenfolge.")
+# Das 'r' vor dem String verhindert den Unicode-Error bei \N
+st.markdown(r"Dieses Skript bereinigt \N, simuliert Standorte und glättet die Fahrtenfolge.")
 
 with st.sidebar:
     st.header("⚙️ Konfiguration")
@@ -27,7 +29,11 @@ FINAL_COLUMNS = [
 if uploaded_file:
     try:
         # Einlesen
-        df = pd.read_csv(uploaded_file, sep=None, engine='python') if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, sep=None, engine='python')
+        else:
+            df = pd.read_excel(uploaded_file)
+            
         df.columns = [str(c).strip() for c in df.columns]
 
         # 1. Nur abgeschlossene Fahrten
@@ -36,25 +42,31 @@ if uploaded_file:
         # 2. Zeit-Parsing & \N Korrektur
         date_cols = ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung"]
         for col in date_cols:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
         
         df = df.dropna(subset=["Uhrzeit des Fahrtbeginns", "Kennzeichen"])
 
-        output = io.BytesIO()
-        orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+        if not df.empty:
+            output = io.BytesIO()
+            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
 
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df['Tag_Key'] = df['Uhrzeit des Fahrtbeginns'].dt.date
-            
-            for (tag, kennzeichen, fahrer), group in df.groupby(['Tag_Key', 'Kennzeichen', 'Fahrername']):
-                group = group.sort_values("Uhrzeit des Fahrtbeginns")
-                final_rows = []
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Wir gruppieren nach Tag und Fahrer
+                df['Tag_Key'] = df['Uhrzeit des Fahrtbeginns'].dt.date
                 
-                # Wir merken uns die letzte Position (Koordinaten)
-                # Falls leer, nehmen wir Kölner Zentrum als Start
-                last_coords = "50.9375 6.9603" 
-
-                for i in range(len(group)):
-                    row = group.iloc[i].to_dict()
+                for (tag, kennzeichen, fahrer), group in df.groupby(['Tag_Key', 'Kennzeichen', 'Fahrername']):
+                    group = group.sort_values("Uhrzeit des Fahrtbeginns")
+                    final_rows = []
                     
-                    # Logik: Ist
+                    # Standard-Startkoordinaten (Köln), falls nichts gefunden wird
+                    last_coords = "50.9375 6.9603" 
+
+                    for i in range(len(group)):
+                        row = group.iloc[i].to_dict()
+                        
+                        if i == 0:
+                            # Erste Fahrt: Standort prüfen
+                            val = str(row.get("Standort des Fahrzeugs bei Auftragsuebermittlung", ""))
+                            if "\\N" in val or "nan" in val.lower() or not val.strip():
+                                row["Standort des Fahrzeugs

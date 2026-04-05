@@ -68,4 +68,67 @@ if uploaded_file:
                         row = group.iloc[i].to_dict()
                         
                         # Standort-Spaltenname in Variable für Kürze
-                        loc
+                        loc_col = "Standort des Fahrzeugs bei Auftragsuebermittlung"
+                        
+                        if i == 0:
+                            val = str(row.get(loc_col, ""))
+                            if "\\N" in val or "nan" in val.lower() or not val.strip():
+                                row[loc_col] = last_loc
+                            else:
+                                last_loc = val
+                            rows.append(row)
+                            continue
+
+                        # Anschluss-Logik
+                        prev = rows[-1]
+                        prev_e = prev["Uhrzeit des Fahrtendes"]
+                        
+                        # Standort = Letztes Ziel / Letzte Position
+                        row[loc_col] = last_loc
+
+                        # Zeiten rücken zusammen
+                        wait = random.randint(min_p, min_p + 2)
+                        new_a = prev_e + timedelta(minutes=wait)
+                        new_s = new_a + timedelta(minutes=random.randint(3, 6))
+                        
+                        dur = row["Uhrzeit des Fahrtendes"] - row["Uhrzeit des Fahrtbeginns"]
+                        
+                        row["Datum/Uhrzeit Auftragseingang"] = new_a - timedelta(seconds=30)
+                        row["Uhrzeit der Auftragsuebermittlung"] = new_a
+                        row["Uhrzeit des Fahrtbeginns"] = new_s
+                        row["Uhrzeit des Fahrtendes"] = new_s + dur
+                        
+                        # KM-Anpassung
+                        orig_s = group.iloc[i]["Uhrzeit des Fahrtbeginns"]
+                        gap_min = (orig_s - new_s).total_seconds() / 60
+                        
+                        if gap_min > 0:
+                            bonus = round(gap_min * (speed_city / 60), 2)
+                            try:
+                                row["Kilometer"] = round(float(row.get("Kilometer", 0)) + bonus, 2)
+                            except:
+                                row["Kilometer"] = bonus
+
+                        row["_CORR"] = True
+                        rows.append(row)
+
+                    # Export
+                    res_df = pd.DataFrame(rows)
+                    for c in d_cols:
+                        if c in res_df.columns:
+                            res_df[c] = pd.to_datetime(res_df[c]).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                    s_name = f"{tag}_{fahrer[:10]}".replace("/", "")[:31]
+                    res_df[FINAL_COLS].to_excel(writer, sheet_name=s_name, index=False)
+                    
+                    ws = writer.sheets[s_name]
+                    for idx, r_d in enumerate(rows, start=2):
+                        if r_d.get("_CORR"):
+                            for c_idx in range(1, len(FINAL_COLS) + 1):
+                                ws.cell(row=idx, column=c_idx).fill = orange
+
+            st.success("✅ Fertig! Struktur korrigiert.")
+            st.download_button("Download", data=output.getvalue(), file_name="Uber_Taryel_Style.xlsx")
+            
+    except Exception as e:
+        st.error(f"Fehler: {e}")

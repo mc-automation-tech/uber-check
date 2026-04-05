@@ -5,24 +5,26 @@ import random
 from datetime import timedelta
 from openpyxl.styles import PatternFill
 
-st.set_page_config(page_title="Taryel Ultimate Logic", layout="wide")
+st.set_page_config(page_title="Taryel Logic Pro", layout="wide")
 
 # --- UI ---
-st.title("🚗 Taryel-Logik: Realistische Schichten & Standorte")
-# Das 'r' vor dem String verhindert den Unicode-Error bei \N
-st.markdown(r"Dieses Skript bereinigt \N, simuliert Standorte und glättet die Fahrtenfolge.")
+st.title("🚗 Taryel-Logik: Schichten & Standorte")
+st.markdown(r"Bereinigt \N, simuliert Standorte und schließt Lücken.")
 
 with st.sidebar:
-    st.header("⚙️ Konfiguration")
-    speed_city = st.number_input("Schnitt KM/H für Anfahrt", value=22)
-    min_pause = st.slider("Pause zw. Fahrten (Min)", 2, 5, 3)
+    st.header("⚙️ Einstellungen")
+    speed_city = st.number_input("Schnitt KM/H", value=22)
+    min_p = st.slider("Pause zw. Fahrten (Min)", 2, 5, 3)
 
 uploaded_file = st.file_uploader("Rohdaten hochladen", type=["xlsx", "csv"])
 
-FINAL_COLUMNS = [
-    "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung", "Datum der Fahrt", 
-    "Fahrtstatus", "Standort des Fahrzeugs bei Auftragsuebermittlung", "Uhrzeit des Fahrtbeginns", 
-    "Uhrzeit des Fahrtendes", "Kennzeichen", "Fahrzeugtyp", "Fahrername", 
+# Spalten-Definition
+FINAL_COLS = [
+    "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung", 
+    "Datum der Fahrt", "Fahrtstatus", 
+    "Standort des Fahrzeugs bei Auftragsuebermittlung", 
+    "Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", 
+    "Kennzeichen", "Fahrzeugtyp", "Fahrername", 
     "Fahrpreis", "Kilometer", "Abholort", "Zielort"
 ]
 
@@ -36,12 +38,14 @@ if uploaded_file:
             
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 1. Nur abgeschlossene Fahrten
-        df = df[df["Fahrtstatus"].str.lower() == "abgeschlossen"]
+        # 1. Nur abgeschlossene
+        if "Fahrtstatus" in df.columns:
+            df = df[df["Fahrtstatus"].str.lower() == "abgeschlossen"]
         
-        # 2. Zeit-Parsing & \N Korrektur
-        date_cols = ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung"]
-        for col in date_cols:
+        # 2. Zeit-Parsing
+        d_cols = ["Uhrzeit des Fahrtbeginns", "Uhrzeit des Fahrtendes", 
+                  "Datum/Uhrzeit Auftragseingang", "Uhrzeit der Auftragsuebermittlung"]
+        for col in d_cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         
@@ -49,91 +53,82 @@ if uploaded_file:
 
         if not df.empty:
             output = io.BytesIO()
-            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+            orange = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
 
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Wir gruppieren nach Tag und Fahrer
                 df['Tag_Key'] = df['Uhrzeit des Fahrtbeginns'].dt.date
                 
-                for (tag, kennzeichen, fahrer), group in df.groupby(['Tag_Key', 'Kennzeichen', 'Fahrername']):
+                for (tag, kennz, fahrer), group in df.groupby(['Tag_Key', 'Kennzeichen', 'Fahrername']):
                     group = group.sort_values("Uhrzeit des Fahrtbeginns")
-                    final_rows = []
-                    
-                    # Standard-Startkoordinaten (Köln), falls nichts gefunden wird
-                    last_coords = "50.9375 6.9603" 
+                    rows = []
+                    # Standard Köln Koordinate
+                    last_loc = "50.9375 6.9603" 
 
                     for i in range(len(group)):
                         row = group.iloc[i].to_dict()
                         
+                        # Standort-Spaltenname in Variable für Kürze
+                        loc_col = "Standort des Fahrzeugs bei Auftragsuebermittlung"
+                        
                         if i == 0:
-                            # Erste Fahrt: Standort prüfen
-                            val = str(row.get("Standort des Fahrzeugs bei Auftragsuebermittlung", ""))
+                            val = str(row.get(loc_col, ""))
                             if "\\N" in val or "nan" in val.lower() or not val.strip():
-                                row["Standort des Fahrzeugs bei Auftragsuebermittlung"] = last_coords
+                                row[loc_col] = last_loc
                             else:
-                                last_coords = val
-                            final_rows.append(row)
+                                last_loc = val
+                            rows.append(row)
                             continue
 
-                        # Vorherige Daten für den Anschluss
-                        prev = final_rows[-1]
-                        prev_ende = prev["Uhrzeit des Fahrtendes"]
+                        # Anschluss-Logik
+                        prev = rows[-1]
+                        prev_e = prev["Uhrzeit des Fahrtendes"]
                         
-                        # 1. STANDORT-LOGIK: Wir bleiben beim letzten Ziel stehen
-                        # Hier nehmen wir die Koordinate der vorherigen Übermittlung als 'Warteposition'
-                        row["Standort des Fahrzeugs bei Auftragsuebermittlung"] = last_coords
+                        # Standort = Letztes Ziel / Letzte Position
+                        row[loc_col] = last_loc
 
-                        # 2. ZEIT-KETTE: Lückenloses "Andocken" wie bei Taryel
-                        wait_time = random.randint(min_pause, min_pause + 2)
-                        new_auftrag = prev_ende + timedelta(minutes=wait_time)
-                        # Anfahrt zum Kunden (ca. 3-6 Min)
-                        drive_to_customer = random.randint(3, 6)
-                        new_start = new_auftrag + timedelta(minutes=drive_to_customer)
+                        # Zeiten rücken zusammen
+                        wait = random.randint(min_p, min_p + 2)
+                        new_a = prev_e + timedelta(minutes=wait)
+                        new_s = new_a + timedelta(minutes=random.randint(3, 6))
                         
-                        # Dauer der Originalfahrt erhalten
-                        original_duration = row["Uhrzeit des Fahrtendes"] - row["Uhrzeit des Fahrtbeginns"]
+                        dur = row["Uhrzeit des Fahrtendes"] - row["Uhrzeit des Fahrtbeginns"]
                         
-                        row["Datum/Uhrzeit Auftragseingang"] = new_auftrag - timedelta(seconds=random.randint(20, 60))
-                        row["Uhrzeit der Auftragsuebermittlung"] = new_auftrag
-                        row["Uhrzeit des Fahrtbeginns"] = new_start
-                        row["Uhrzeit des Fahrtendes"] = new_start + original_duration
+                        row["Datum/Uhrzeit Auftragseingang"] = new_a - timedelta(seconds=30)
+                        row["Uhrzeit der Auftragsuebermittlung"] = new_a
+                        row["Uhrzeit des Fahrtbeginns"] = new_s
+                        row["Uhrzeit des Fahrtendes"] = new_s + dur
                         
-                        # 3. KILOMETER-LOGIK (Anfahrt simulieren)
-                        # Zeitlücke zwischen altem und neuem Start
-                        orig_start_val = group.iloc[i]["Uhrzeit des Fahrtbeginns"]
-                        time_gap_to_orig = (orig_start_val - new_start).total_seconds() / 60
+                        # KM-Anpassung
+                        orig_s = group.iloc[i]["Uhrzeit des Fahrtbeginns"]
+                        gap_min = (orig_s - new_s).total_seconds() / 60
                         
-                        if time_gap_to_orig > 0:
-                            bonus_km = round(time_gap_to_orig * (speed_city / 60), 2)
+                        if gap_min > 0:
+                            bonus = round(gap_min * (speed_city / 60), 2)
                             try:
-                                row["Kilometer"] = round(float(row.get("Kilometer", 0)) + bonus_km, 2)
+                                row["Kilometer"] = round(float(row.get("Kilometer", 0)) + bonus, 2)
                             except:
-                                row["Kilometer"] = bonus_km
+                                row["Kilometer"] = bonus
 
-                        row["_CORRECTED"] = True
-                        final_rows.append(row)
+                        row["_CORR"] = True
+                        rows.append(row)
 
-                    # Export-Vorbereitung
-                    res_df = pd.DataFrame(final_rows)
-                    for c in date_cols:
+                    # Export
+                    res_df = pd.DataFrame(rows)
+                    for c in d_cols:
                         if c in res_df.columns:
                             res_df[c] = pd.to_datetime(res_df[c]).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-                    # Sheet-Name (max 31 Zeichen)
-                    sheet_name = f"{tag}_{fahrer[:10]}".replace("/", "").replace(":", "")[:31]
-                    res_df[FINAL_COLUMNS].to_excel(writer, sheet_name=sheet_name, index=False)
+                    s_name = f"{tag}_{fahrer[:10]}".replace("/", "")[:31]
+                    res_df[FINAL_COLS].to_excel(writer, sheet_name=s_name, index=False)
                     
-                    # Färbung der korrigierten Zeilen
-                    ws = writer.sheets[sheet_name]
-                    for idx, r_data in enumerate(final_rows, start=2):
-                        if r_data.get("_CORRECTED"):
-                            for c_idx in range(1, len(FINAL_COLUMNS) + 1):
-                                ws.cell(row=idx, column=c_idx).fill = orange_fill
+                    ws = writer.sheets[s_name]
+                    for idx, r_d in enumerate(rows, start=2):
+                        if r_d.get("_CORR"):
+                            for c_idx in range(1, len(FINAL_COLS) + 1):
+                                ws.cell(row=idx, column=c_idx).fill = orange
 
-            st.success("✅ Fehler behoben! Die 'grüne' Liste mit korrekten Standorten ist bereit.")
-            st.download_button("Perfektionierte Taryel-Liste laden", data=output.getvalue(), file_name="Uber_Taryel_Corrected.xlsx")
-        else:
-            st.warning("Keine gültigen Daten gefunden.")
+            st.success("✅ Fertig! Struktur korrigiert.")
+            st.download_button("Download", data=output.getvalue(), file_name="Uber_Taryel_Style.xlsx")
             
     except Exception as e:
         st.error(f"Fehler: {e}")
